@@ -26,6 +26,7 @@ import OccName
 import Name                 ( nameOccName )
 import RdrName              ( rdrNameOcc )
 import FastString           ( unpackFS, unpackLitString, zString )
+import Outputable           ( panic)
 
 import qualified Data.Map as Map
 import System.Directory
@@ -211,7 +212,7 @@ processExports (e : es) =
 
 
 isSimpleSig :: ExportItem DocName -> Maybe ([DocName], HsType DocName)
-isSimpleSig ExportDecl { expItemDecl = L _ (SigD (TypeSig lnames (L _ t)))
+isSimpleSig ExportDecl { expItemDecl = L _ (SigD (TypeSig lnames (L _ t) _))
                        , expItemMbDoc = (Documentation Nothing Nothing, argDocs) }
   | Map.null argDocs = Just (map unLoc lnames, t)
 isSimpleSig _ = Nothing
@@ -234,7 +235,7 @@ processExport (ExportNoDecl y subs)
 processExport (ExportModule mdl)
   = declWithDoc (text "module" <+> text (moduleString mdl)) Nothing
 processExport (ExportDoc doc)
-  = docToLaTeX doc
+  = docToLaTeX $ _doc doc
 
 
 ppDocGroup :: Int -> LaTeX -> LaTeX
@@ -248,7 +249,7 @@ ppDocGroup lev doc = sec lev <> braces doc
 declNames :: LHsDecl DocName -> [DocName]
 declNames (L _ decl) = case decl of
   TyClD d  -> [tcdName d]
-  SigD (TypeSig lnames _) -> map unLoc lnames
+  SigD (TypeSig lnames _ _) -> map unLoc lnames
   SigD (PatSynSig lname _ _ _ _) -> [unLoc lname]
   ForD (ForeignImport (L _ n) _ _ _) -> [n]
   ForD (ForeignExport (L _ n) _ _ _) -> [n]
@@ -292,9 +293,9 @@ ppDecl (L loc decl) (doc, fnArgsDoc) instances subdocs _fixities = case decl of
 --    | Just _  <- tcdTyPats d    -> ppTyInst False loc doc d unicode
 -- Family instances happen via FamInst now
   TyClD d@(ClassDecl {})         -> ppClassDecl instances loc doc subdocs d unicode
-  SigD (TypeSig lnames (L _ t))  -> ppFunSig loc (doc, fnArgsDoc) (map unLoc lnames) t unicode
-  SigD (PatSynSig lname args ty prov req) ->
-      ppLPatSig loc (doc, fnArgsDoc) lname args ty prov req unicode
+  SigD (TypeSig lnames (L _ t) _) -> ppFunSig loc (doc, fnArgsDoc) (map unLoc lnames) t unicode
+  SigD (PatSynSig lname qtvs prov req ty) ->
+      ppLPatSig loc (doc, fnArgsDoc) lname qtvs prov req ty unicode
   ForD d                         -> ppFor loc (doc, fnArgsDoc) d unicode
   InstD _                        -> empty
   _                              -> error "declaration not supported by ppDecl"
@@ -350,32 +351,28 @@ ppFunSig loc doc docnames typ unicode =
    names = map getName docnames
 
 ppLPatSig :: SrcSpan -> DocForDecl DocName -> Located DocName
-          -> HsPatSynDetails (LHsType DocName) -> LHsType DocName
+          -> (HsExplicitFlag, LHsTyVarBndrs DocName)
           -> LHsContext DocName -> LHsContext DocName
+          -> LHsType DocName
           -> Bool -> LaTeX
-ppLPatSig loc doc docname args typ prov req unicode =
-    ppPatSig loc doc (unLoc docname) (fmap unLoc args) (unLoc typ) (unLoc prov) (unLoc req) unicode
-
-ppPatSig :: SrcSpan -> DocForDecl DocName -> DocName
-          -> HsPatSynDetails (HsType DocName) -> HsType DocName
-          -> HsContext DocName -> HsContext DocName
-          -> Bool -> LaTeX
-ppPatSig _loc (doc, _argDocs) docname args typ prov req unicode = declWithDoc pref1 (documentationToLaTeX doc)
+ppLPatSig _loc (doc, _argDocs) (L _ name) (expl, qtvs) lprov lreq (L _ ty) unicode
+  = declWithDoc pref1 (documentationToLaTeX doc)
   where
     pref1 = hsep [ keyword "pattern"
-                 , pp_ctx prov
-                 , pp_head
+                 , ppDocBinder name
                  , dcolon unicode
-                 , pp_ctx req
-                 , ppType unicode typ
+                 , ppLTyVarBndrs expl qtvs unicode
+                 , ctx
+                 , ppType unicode ty
                  ]
 
-    pp_head = case args of
-        PrefixPatSyn typs -> hsep $ ppDocBinder docname : map pp_type typs
-        InfixPatSyn left right -> hsep [pp_type left, ppDocBinderInfix docname, pp_type right]
+    ctx = case (ppLContextMaybe lprov unicode, ppLContextMaybe lreq unicode) of
+        (Nothing,   Nothing)  -> empty
+        (Nothing,   Just req) -> parens empty <+> darr <+> req <+> darr
+        (Just prov, Nothing)  -> prov <+> darr
+        (Just prov, Just req) -> prov <+> darr <+> req <+> darr
 
-    pp_type = ppParendType unicode
-    pp_ctx ctx = ppContext ctx unicode
+    darr = darrow unicode
 
 ppTypeOrFunSig :: SrcSpan -> [DocName] -> HsType DocName
                -> DocForDecl DocName -> (LaTeX, LaTeX, LaTeX)
@@ -393,16 +390,18 @@ ppTypeOrFunSig _ _ typ (doc, argDocs) (pref1, pref2, sep0)
   where
      do_largs n leader (L _ t) = do_args n leader t
 
-     arg_doc n = rDoc (Map.lookup n argDocs)
+     arg_doc n = rDoc . fmap _doc $ Map.lookup n argDocs
 
      do_args :: Int -> LaTeX -> (HsType DocName) -> LaTeX
-     do_args n leader (HsForAllTy Explicit tvs lctxt ltype)
+     do_args n leader (HsForAllTy Explicit _ tvs lctxt ltype)
        = decltt leader <->
              decltt (hsep (forallSymbol unicode : ppTyVars tvs ++ [dot]) <+>
                 ppLContextNoArrow lctxt unicode) <+> nl $$
          do_largs n (darrow unicode) ltype
 
-     do_args n leader (HsForAllTy Implicit _ lctxt ltype)
+     do_args n leader (HsForAllTy Qualified e a lctxt ltype)
+       = do_args n leader (HsForAllTy Implicit e a lctxt ltype)
+     do_args n leader (HsForAllTy Implicit _ _ lctxt ltype)
        | not (null (unLoc lctxt))
        = decltt leader <-> decltt (ppLContextNoArrow lctxt unicode) <+> nl $$
          do_largs n (darrow unicode) ltype
@@ -522,7 +521,7 @@ ppClassDecl instances loc doc subdocs
     methodTable =
       text "\\haddockpremethods{}\\textbf{Methods}" $$
       vcat  [ ppFunSig loc doc names typ unicode
-            | L _ (TypeSig lnames (L _ typ)) <- lsigs
+            | L _ (TypeSig lnames (L _ typ) _) <- lsigs
             , let doc = lookupAnySubdoc (head names) subdocs
                   names = map unLoc lnames ]
               -- FIXME: is taking just the first name ok? Is it possible that
@@ -553,7 +552,7 @@ isUndocdInstance _ = Nothing
 -- style.
 ppDocInstance :: Bool -> DocInstance DocName -> LaTeX
 ppDocInstance unicode (instHead, doc) =
-  declWithDoc (ppInstDecl unicode instHead) (fmap docToLaTeX doc)
+  declWithDoc (ppInstDecl unicode instHead) (fmap docToLaTeX $ fmap _doc doc)
 
 
 ppInstDecl :: Bool -> InstHead DocName -> LaTeX
@@ -621,6 +620,7 @@ ppConstrHdr forall tvs ctxt unicode
   where
     ppForall = case forall of
       Explicit -> forallSymbol unicode <+> hsep (map ppName tvs) <+> text ". "
+      Qualified -> empty
       Implicit -> empty
 
 
@@ -632,19 +632,19 @@ ppSideBySideConstr subdocs unicode leader (L _ con) =
   ResTyH98 -> case con_details con of
 
     PrefixCon args ->
-      decltt (hsep ((header_ unicode <+> ppBinder occ) :
+      decltt (hsep ((header_ unicode <+> ppOcc) :
                  map (ppLParendType unicode) args))
       <-> rDoc mbDoc <+> nl
 
     RecCon fields ->
-      (decltt (header_ unicode <+> ppBinder occ)
+      (decltt (header_ unicode <+> ppOcc)
         <-> rDoc mbDoc <+> nl)
       $$
       doRecordFields fields
 
     InfixCon arg1 arg2 ->
       decltt (hsep [ header_ unicode <+> ppLParendType unicode arg1,
-                 ppBinder occ,
+                 ppOcc,
                  ppLParendType unicode arg2 ])
       <-> rDoc mbDoc <+> nl
 
@@ -658,33 +658,40 @@ ppSideBySideConstr subdocs unicode leader (L _ con) =
 
  where
     doRecordFields fields =
-        vcat (map (ppSideBySideField subdocs unicode) fields)
+        vcat (map (ppSideBySideField subdocs unicode) (map unLoc fields))
 
-    doGADTCon args resTy = decltt (ppBinder occ <+> dcolon unicode <+> hsep [
+    doGADTCon args resTy = decltt (ppOcc <+> dcolon unicode <+> hsep [
                                ppForAll forall ltvs (con_cxt con) unicode,
                                ppLType unicode (foldr mkFunTy resTy args) ]
                             ) <-> rDoc mbDoc
 
 
     header_ = ppConstrHdr forall tyVars context
-    occ     = nameOccName . getName . unLoc . con_name $ con
+    occ     = map (nameOccName . getName . unLoc) $ con_names con
+    ppOcc   = case occ of
+      [one] -> ppBinder one
+      _     -> cat (punctuate comma (map ppBinder occ))
     ltvs    = con_qvars con
     tyVars  = tyvarNames (con_qvars con)
     context = unLoc (con_cxt con)
     forall  = con_explicit con
     -- don't use "con_doc con", in case it's reconstructed from a .hi file,
     -- or also because we want Haddock to do the doc-parsing, not GHC.
-    mbDoc = lookup (unLoc $ con_name con) subdocs >>= combineDocumentation . fst
+    mbDoc = case con_names con of
+              [] -> panic "empty con_names"
+              (cn:_) -> lookup (unLoc cn) subdocs >>=
+                        fmap _doc . combineDocumentation . fst
     mkFunTy a b = noLoc (HsFunTy a b)
 
 
 ppSideBySideField :: [(DocName, DocForDecl DocName)] -> Bool -> ConDeclField DocName ->  LaTeX
-ppSideBySideField subdocs unicode (ConDeclField (L _ name) ltype _) =
-  decltt (ppBinder (nameOccName . getName $ name)
+ppSideBySideField subdocs unicode (ConDeclField names ltype _) =
+  decltt (cat (punctuate comma (map (ppBinder . nameOccName . getName . unL) names))
     <+> dcolon unicode <+> ppLType unicode ltype) <-> rDoc mbDoc
   where
     -- don't use cd_fld_doc for same reason we don't use con_doc above
-    mbDoc = lookup name subdocs >>= combineDocumentation . fst
+    -- Where there is more than one name, they all have the same documentation
+    mbDoc = lookup (unL $ head names) subdocs >>= fmap _doc . combineDocumentation . fst
 
 -- {-
 -- ppHsFullConstr :: HsConDecl -> LaTeX
@@ -783,15 +790,21 @@ ppLContext, ppLContextNoArrow :: Located (HsContext DocName) -> Bool -> LaTeX
 ppLContext        = ppContext        . unLoc
 ppLContextNoArrow = ppContextNoArrow . unLoc
 
+ppLContextMaybe :: Located (HsContext DocName) -> Bool -> Maybe LaTeX
+ppLContextMaybe = ppContextNoLocsMaybe . map unLoc . unLoc
+
+ppContextNoLocsMaybe :: [HsType DocName] -> Bool -> Maybe LaTeX
+ppContextNoLocsMaybe [] _ = Nothing
+ppContextNoLocsMaybe cxt unicode = Just $ pp_hs_context cxt unicode
 
 ppContextNoArrow :: HsContext DocName -> Bool -> LaTeX
-ppContextNoArrow []  _ = empty
-ppContextNoArrow cxt unicode = pp_hs_context (map unLoc cxt) unicode
+ppContextNoArrow cxt unicode = fromMaybe empty $
+                               ppContextNoLocsMaybe (map unLoc cxt) unicode
 
 
 ppContextNoLocs :: [HsType DocName] -> Bool -> LaTeX
-ppContextNoLocs []  _ = empty
-ppContextNoLocs cxt unicode = pp_hs_context cxt unicode <+> darrow unicode
+ppContextNoLocs cxt unicode = maybe empty (<+> darrow unicode) $
+                              ppContextNoLocsMaybe cxt unicode
 
 
 ppContext :: HsContext DocName -> Bool -> LaTeX
@@ -866,23 +879,28 @@ ppKind unicode ki = ppr_mono_ty pREC_TOP ki unicode
 
 ppForAll :: HsExplicitFlag -> LHsTyVarBndrs DocName
          -> Located (HsContext DocName) -> Bool -> LaTeX
-ppForAll expl tvs cxt unicode
-  | show_forall = forall_part <+> ppLContext cxt unicode
-  | otherwise   = ppLContext cxt unicode
+ppForAll expl tvs cxt unicode = ppLTyVarBndrs expl tvs unicode <+> ppLContext cxt unicode
+
+ppLTyVarBndrs :: HsExplicitFlag -> LHsTyVarBndrs DocName
+              -> Bool -> LaTeX
+ppLTyVarBndrs expl tvs unicode
+  | show_forall = hsep (forallSymbol unicode : ppTyVars tvs) <> dot
+  | otherwise   = empty
   where
     show_forall = not (null (hsQTvBndrs tvs)) && is_explicit
-    is_explicit = case expl of {Explicit -> True; Implicit -> False}
-    forall_part = hsep (forallSymbol unicode : ppTyVars tvs) <> dot
-
+    is_explicit = case expl of {Explicit -> True; Implicit -> False; Qualified -> False}
 
 ppr_mono_lty :: Int -> LHsType DocName -> Bool -> LaTeX
 ppr_mono_lty ctxt_prec ty unicode = ppr_mono_ty ctxt_prec (unLoc ty) unicode
 
 
 ppr_mono_ty :: Int -> HsType DocName -> Bool -> LaTeX
-ppr_mono_ty ctxt_prec (HsForAllTy expl tvs ctxt ty) unicode
+ppr_mono_ty ctxt_prec (HsForAllTy expl extra tvs ctxt ty) unicode
   = maybeParen ctxt_prec pREC_FUN $
-    hsep [ppForAll expl tvs ctxt unicode, ppr_mono_lty pREC_TOP ty unicode]
+    hsep [ppForAll expl tvs ctxt' unicode, ppr_mono_lty pREC_TOP ty unicode]
+ where ctxt' = case extra of
+                 Just loc -> (++ [L loc HsWildcardTy]) `fmap` ctxt
+                 Nothing  -> ctxt
 
 ppr_mono_ty _         (HsBangTy b ty)     u = ppBang b <> ppLParendType u ty
 ppr_mono_ty _         (HsTyVar name)      _ = ppDocName name
@@ -922,6 +940,10 @@ ppr_mono_ty ctxt_prec (HsParTy ty) unicode
 ppr_mono_ty ctxt_prec (HsDocTy ty _) unicode
   = ppr_mono_lty ctxt_prec ty unicode
 
+ppr_mono_ty _ HsWildcardTy _ = char '_'
+
+ppr_mono_ty _ (HsNamedWildcardTy name) _ = ppDocName name
+
 ppr_mono_ty _ (HsTyLit t) u = ppr_tylit t u
 
 
@@ -950,11 +972,6 @@ ppBinder :: OccName -> LaTeX
 ppBinder n
   | isInfixName n = parens $ ppOccName n
   | otherwise     = ppOccName n
-
-ppBinderInfix :: OccName -> LaTeX
-ppBinderInfix n
-  | isInfixName n = ppOccName n
-  | otherwise     = quotes $ ppOccName n
 
 isInfixName :: OccName -> Bool
 isInfixName n = isVarSym n || isConSym n
@@ -993,9 +1010,6 @@ ppLDocName (L _ d) = ppDocName d
 
 ppDocBinder :: DocName -> LaTeX
 ppDocBinder = ppBinder . nameOccName . getName
-
-ppDocBinderInfix :: DocName -> LaTeX
-ppDocBinderInfix = ppBinderInfix . nameOccName . getName
 
 
 ppName :: Name -> LaTeX
@@ -1105,7 +1119,7 @@ docToLaTeX doc = markup latexMarkup doc Plain
 
 
 documentationToLaTeX :: Documentation DocName -> Maybe LaTeX
-documentationToLaTeX = fmap docToLaTeX . combineDocumentation
+documentationToLaTeX = fmap docToLaTeX . fmap _doc . combineDocumentation
 
 
 rdrDocToLaTeX :: Doc RdrName -> LaTeX

@@ -41,7 +41,7 @@ main = do
 test :: IO ()
 test = do
   x <- doesFileExist haddockPath
-  unless x $ die "you need to run 'cabal build' successfully first"
+  unless x $ System.Exit.die "you need to run 'cabal build' successfully first"
 
   contents <- getDirectoryContents testDir
   args <- getArgs
@@ -54,7 +54,7 @@ test = do
   let mods' = map (testDir </>) mods
 
   -- add haddock_datadir to environment for subprocesses
-  env <- Just . (:) ("haddock_datadir", dataDir) <$> getEnvironment
+  env <- Just . (:) ("haddock_datadir", Main.dataDir) <$> getEnvironment
 
   putStrLn ""
   putStrLn "Haddock version: "

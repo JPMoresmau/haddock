@@ -1,11 +1,42 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-module Documentation.Haddock.Doc (docParagraph, docAppend, docConcat) where
+module Documentation.Haddock.Doc (docParagraph, docAppend,
+                                  docConcat, metaDocConcat,
+                                  metaDocAppend, emptyMetaDoc,
+                                  metaAppend, metaConcat) where
 
+import Control.Applicative ((<|>), empty)
 import Documentation.Haddock.Types
 import Data.Char (isSpace)
 
 docConcat :: [DocH mod id] -> DocH mod id
 docConcat = foldr docAppend DocEmpty
+
+-- | Concat using 'metaAppend'.
+metaConcat :: [Meta] -> Meta
+metaConcat = foldr metaAppend emptyMeta
+
+-- | Like 'docConcat' but also joins the 'Meta' info.
+metaDocConcat :: [MetaDoc mod id] -> MetaDoc mod id
+metaDocConcat = foldr metaDocAppend emptyMetaDoc
+
+-- | We do something perhaps unexpected here and join the meta info
+-- in ‘reverse’: this results in the metadata from the ‘latest’
+-- paragraphs taking precedence.
+metaDocAppend :: MetaDoc mod id -> MetaDoc mod id -> MetaDoc mod id
+metaDocAppend (MetaDoc { _meta = m, _doc = d })
+              (MetaDoc { _meta = m', _doc = d' }) =
+  MetaDoc { _meta = m' `metaAppend` m, _doc = d `docAppend` d' }
+
+-- | This is not a monoidal append, it uses '<|>' for the '_version'.
+metaAppend :: Meta -> Meta -> Meta
+metaAppend (Meta { _version = v }) (Meta { _version = v' }) =
+  Meta { _version = v <|> v' }
+
+emptyMetaDoc :: MetaDoc mod id
+emptyMetaDoc = MetaDoc { _meta = emptyMeta, _doc = DocEmpty }
+
+emptyMeta :: Meta
+emptyMeta = Meta { _version = empty }
 
 docAppend :: DocH mod id -> DocH mod id -> DocH mod id
 docAppend (DocDefList ds1) (DocDefList ds2) = DocDefList (ds1++ds2)

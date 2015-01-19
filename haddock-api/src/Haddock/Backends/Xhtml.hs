@@ -35,9 +35,6 @@ import Text.XHtml hiding ( name, title, p, quote )
 import Haddock.GhcUtils
 
 import Control.Monad         ( when, unless )
-#if !MIN_VERSION_base(4,7,0)
-import Control.Monad.Instances ( ) -- for Functor Either a
-#endif
 import Data.Char             ( toUpper )
 import Data.Functor          ( (<$>) )
 import Data.List             ( sortBy, groupBy, intercalate, isPrefixOf )
@@ -60,11 +57,12 @@ import Module
 --------------------------------------------------------------------------------
 
 
-ppHtml :: String
+ppHtml :: DynFlags
+       -> String                       -- ^ Title
        -> Maybe String                 -- ^ Package
        -> [Interface]
        -> FilePath                     -- ^ Destination directory
-       -> Maybe (Doc GHC.RdrName)      -- ^ Prologue text, maybe
+       -> Maybe (MDoc GHC.RdrName)     -- ^ Prologue text, maybe
        -> Themes                       -- ^ Themes
        -> SourceURLs                   -- ^ The source URL (--source)
        -> WikiURLs                     -- ^ The wiki URL (--wiki)
@@ -75,7 +73,7 @@ ppHtml :: String
        -> Bool                         -- ^ Output pretty html (newlines and indenting)
        -> IO ()
 
-ppHtml doctitle maybe_package ifaces odir prologue
+ppHtml dflags doctitle maybe_package ifaces odir prologue
         themes maybe_source_url maybe_wiki_url
         maybe_contents_url maybe_index_url unicode
         qual debug =  do
@@ -84,7 +82,7 @@ ppHtml doctitle maybe_package ifaces odir prologue
     visible i = OptHide `notElem` ifaceOptions i
 
   when (isNothing maybe_contents_url) $
-    ppHtmlContents odir doctitle maybe_package
+    ppHtmlContents dflags odir doctitle maybe_package
         themes maybe_index_url maybe_source_url maybe_wiki_url
         (map toInstalledIface visible_ifaces)
         False -- we don't want to display the packages in a single-package contents
@@ -239,21 +237,22 @@ moduleInfo iface =
 
 
 ppHtmlContents
-   :: FilePath
+   :: DynFlags
+   -> FilePath
    -> String
    -> Maybe String
    -> Themes
    -> Maybe String
    -> SourceURLs
    -> WikiURLs
-   -> [InstalledInterface] -> Bool -> Maybe (Doc GHC.RdrName)
+   -> [InstalledInterface] -> Bool -> Maybe (MDoc GHC.RdrName)
    -> Bool
    -> Qualification  -- ^ How to qualify names
    -> IO ()
-ppHtmlContents odir doctitle _maybe_package
+ppHtmlContents dflags odir doctitle _maybe_package
   themes maybe_index_url
   maybe_source_url maybe_wiki_url ifaces showPkgs prologue debug qual = do
-  let tree = mkModuleTree showPkgs
+  let tree = mkModuleTree dflags showPkgs
          [(instMod iface, toInstalledDescription iface) | iface <- ifaces]
       html =
         headHtml doctitle Nothing themes +++
@@ -270,7 +269,7 @@ ppHtmlContents odir doctitle _maybe_package
   ppHtmlContentsFrame odir doctitle themes ifaces debug
 
 
-ppPrologue :: Qualification -> String -> Maybe (Doc GHC.RdrName) -> Html
+ppPrologue :: Qualification -> String -> Maybe (MDoc GHC.RdrName) -> Html
 ppPrologue _ _ Nothing = noHtml
 ppPrologue qual title (Just doc) =
   divDescription << (h1 << title +++ docElement thediv (rdrDocToHtml qual doc))
@@ -306,7 +305,7 @@ mkNode qual ss p (Node s leaf pkg short ts) =
 
     htmlModule = thespan ! modAttrs << (cBtn +++
       if leaf
-        then ppModule (mkModule (stringToPackageId (fromMaybe "" pkg))
+        then ppModule (mkModule (stringToPackageKey (fromMaybe "" pkg))
                                        (mkModuleName mdl))
         else toHtml s
       )
@@ -585,12 +584,11 @@ processForMiniSynopsis mdl unicode qual ExportDecl { expItemDecl = L _loc decl0 
         (DataDecl{})   -> [keyword "data" <+> b]
         (SynDecl{})    -> [keyword "type" <+> b]
         (ClassDecl {}) -> [keyword "class" <+> b]
-        _ -> []
-    SigD (TypeSig lnames (L _ _)) ->
+    SigD (TypeSig lnames (L _ _) _) ->
       map (ppNameMini Prefix mdl . nameOccName . getName . unLoc) lnames
     _ -> []
 processForMiniSynopsis _ _ qual (ExportGroup lvl _id txt) =
-  [groupTag lvl << docToHtml Nothing qual txt]
+  [groupTag lvl << docToHtml Nothing qual (mkMeta txt)]
 processForMiniSynopsis _ _ _ _ = []
 
 
@@ -625,7 +623,7 @@ ppModuleContents qual exports
     | otherwise = ( html:secs, rest2 )
     where
       html = linkedAnchor (groupId id0)
-             << docToHtmlNoAnchors (Just id0) qual doc +++ mk_subsections ssecs
+             << docToHtmlNoAnchors (Just id0) qual (mkMeta doc) +++ mk_subsections ssecs
       (ssecs, rest1) = process lev rest
       (secs,  rest2) = process n   rest1
   process n (_ : rest) = process n rest
@@ -649,7 +647,7 @@ processExport :: Bool -> LinksInfo -> Bool -> Qualification
               -> ExportItem DocName -> Maybe Html
 processExport _ _ _ _ ExportDecl { expItemDecl = L _ (InstD _) } = Nothing -- Hide empty instances
 processExport summary _ _ qual (ExportGroup lev id0 doc)
-  = nothingIf summary $ groupHeading lev id0 << docToHtml (Just id0) qual doc
+  = nothingIf summary $ groupHeading lev id0 << docToHtml (Just id0) qual (mkMeta doc)
 processExport summary links unicode qual (ExportDecl decl doc subdocs insts fixities splice)
   = processDecl summary $ ppDecl summary links decl doc insts fixities subdocs splice unicode qual
 processExport summary _ _ qual (ExportNoDecl y [])

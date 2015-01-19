@@ -22,13 +22,13 @@ module Documentation.Haddock.Parser ( parseString, parseParas
 import           Control.Applicative
 import           Control.Arrow (first)
 import           Control.Monad
-import           Data.Attoparsec.ByteString.Char8 hiding (parse, take, endOfLine)
 import qualified Data.ByteString.Char8 as BS
 import           Data.Char (chr, isAsciiUpper)
 import           Data.List (stripPrefix, intercalate, unfoldr)
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid
 import           Documentation.Haddock.Doc
+import           Documentation.Haddock.Parser.Monad hiding (take, endOfLine)
 import           Documentation.Haddock.Parser.Util
 import           Documentation.Haddock.Types
 import           Documentation.Haddock.Utf8
@@ -78,7 +78,7 @@ overIdentifier f d = g d
     g (DocExamples x) = DocExamples x
     g (DocHeader (Header l x)) = DocHeader . Header l $ g x
 
-parse :: Parser a -> BS.ByteString -> a
+parse :: Parser a -> BS.ByteString -> (ParserState, a)
 parse p = either err id . parseOnly (p <* endOfInput)
   where
     err = error . ("Haddock.Parser.parse: " ++)
@@ -86,11 +86,21 @@ parse p = either err id . parseOnly (p <* endOfInput)
 -- | Main entry point to the parser. Appends the newline character
 -- to the input string.
 parseParas :: String -- ^ String to parse
-           -> DocH mod Identifier
-parseParas = parse (p <* skipSpace) . encodeUtf8 . (++ "\n")
+           -> MetaDoc mod Identifier
+parseParas input = case parseParasState input of
+  (state, a) -> MetaDoc { _meta = Meta { _version = parserStateSince state }
+                        , _doc = a
+                        }
+
+parseParasState :: String -> (ParserState, DocH mod Identifier)
+parseParasState = parse (p <* skipSpace) . encodeUtf8 . (++ "\n")
   where
     p :: Parser (DocH mod Identifier)
     p = docConcat <$> paragraph `sepBy` many (skipHorizontalSpace *> "\n")
+
+parseParagraphs :: String -> Parser (DocH mod Identifier)
+parseParagraphs input = case parseParasState input of
+  (state, a) -> setParserState state >> return a
 
 -- | Parse a text paragraph. Actually just a wrapper over 'parseStringBS' which
 -- drops leading whitespace and encodes the string to UTF8 first.
@@ -98,7 +108,7 @@ parseString :: String -> DocH mod Identifier
 parseString = parseStringBS . encodeUtf8 . dropWhile isSpace
 
 parseStringBS :: BS.ByteString -> DocH mod Identifier
-parseStringBS = parse p
+parseStringBS = snd . parse p
   where
     p :: Parser (DocH mod Identifier)
     p = docConcat <$> many (monospace <|> anchor <|> identifier <|> moduleName
@@ -109,8 +119,8 @@ parseStringBS = parse p
 -- | Parses and processes
 -- <https://en.wikipedia.org/wiki/Numeric_character_reference Numeric character references>
 --
--- >>> parseOnly encodedChar "&#65;"
--- Right (DocString "A")
+-- >>> parseString "&#65;"
+-- DocString "A"
 encodedChar :: Parser (DocH mod a)
 encodedChar = "&#" *> c <* ";"
   where
@@ -142,16 +152,16 @@ skipSpecialChar = DocString . return <$> satisfy (`elem` specialChar)
 
 -- | Emphasis parser.
 --
--- >>> parseOnly emphasis "/Hello world/"
--- Right (DocEmphasis (DocString "Hello world"))
+-- >>> parseString "/Hello world/"
+-- DocEmphasis (DocString "Hello world")
 emphasis :: Parser (DocH mod Identifier)
 emphasis = DocEmphasis . parseStringBS <$>
   mfilter ('\n' `BS.notElem`) ("/" *> takeWhile1_ (/= '/') <* "/")
 
 -- | Bold parser.
 --
--- >>> parseOnly bold "__Hello world__"
--- Right (DocBold (DocString "Hello world"))
+-- >>> parseString "__Hello world__"
+-- DocBold (DocString "Hello world")
 bold :: Parser (DocH mod Identifier)
 bold = DocBold . parseStringBS <$> disallowNewline ("__" *> takeUntil "__")
 
@@ -173,19 +183,23 @@ takeWhile1_ = mfilter (not . BS.null) . takeWhile_
 
 -- | Text anchors to allow for jumping around the generated documentation.
 --
--- >>> parseOnly anchor "#Hello world#"
--- Right (DocAName "Hello world")
+-- >>> parseString "#Hello world#"
+-- DocAName "Hello world"
 anchor :: Parser (DocH mod a)
 anchor = DocAName . decodeUtf8 <$>
          disallowNewline ("#" *> takeWhile1_ (/= '#') <* "#")
 
 -- | Monospaced strings.
 --
--- >>> parseOnly monospace "@cruel@"
--- Right (DocMonospaced (DocString "cruel"))
+-- >>> parseString "@cruel@"
+-- DocMonospaced (DocString "cruel")
 monospace :: Parser (DocH mod Identifier)
-monospace = DocMonospaced . parseStringBS <$> ("@" *> takeWhile1_ (/= '@') <* "@")
+monospace = DocMonospaced . parseStringBS
+            <$> ("@" *> takeWhile1_ (/= '@') <* "@")
 
+-- | Module names: we try our reasonable best to only allow valid
+-- Haskell module names, with caveat about not matching on technically
+-- valid unicode symbols.
 moduleName :: Parser (DocH mod a)
 moduleName = DocModule <$> (char '"' *> modid <* char '"')
   where
@@ -196,15 +210,15 @@ moduleName = DocModule <$> (char '"' *> modid <* char '"')
       -- accept {small | large | digit | ' } here.  But as we can't
       -- match on unicode characters, this is currently not possible.
       -- Note that we allow ‘#’ to suport anchors.
-      <*> (decodeUtf8 <$> takeWhile (`notElem` " .&[{}(=*)+]!|@/;,^?\"\n"))
+      <*> (decodeUtf8 <$> takeWhile (`notElem` (" .&[{}(=*)+]!|@/;,^?\"\n"::String)))
 
 -- | Picture parser, surrounded by \<\< and \>\>. It's possible to specify
 -- a title for the picture.
 --
--- >>> parseOnly picture "<<hello.png>>"
--- Right (DocPic (Picture {pictureUri = "hello.png", pictureTitle = Nothing}))
--- >>> parseOnly picture "<<hello.png world>>"
--- Right (DocPic (Picture {pictureUri = "hello.png", pictureTitle = Just "world"}))
+-- >>> parseString "<<hello.png>>"
+-- DocPic (Picture {pictureUri = "hello.png", pictureTitle = Nothing})
+-- >>> parseString "<<hello.png world>>"
+-- DocPic (Picture {pictureUri = "hello.png", pictureTitle = Just "world"})
 picture :: Parser (DocH mod a)
 picture = DocPic . makeLabeled Picture . decodeUtf8
           <$> disallowNewline ("<<" *> takeUntil ">>")
@@ -217,7 +231,8 @@ markdownImage = fromHyperlink <$> ("!" *> linkParser)
 -- | Paragraph parser, called by 'parseParas'.
 paragraph :: Parser (DocH mod Identifier)
 paragraph = examples <|> skipSpace *> (
-      unorderedList
+      since
+  <|> unorderedList
   <|> orderedList
   <|> birdtracks
   <|> codeblock
@@ -228,12 +243,17 @@ paragraph = examples <|> skipSpace *> (
   <|> docParagraph <$> textParagraph
   )
 
+since :: Parser (DocH mod a)
+since = ("@since " *> version <* skipHorizontalSpace <* endOfLine) >>= setSince >> return DocEmpty
+  where
+    version = decimal `sepBy1'` "."
+
 -- | Headers inside the comment denoted with @=@ signs, up to 6 levels
 -- deep.
 --
--- >>> parseOnly header "= Hello"
+-- >>> snd <$> parseOnly header "= Hello"
 -- Right (DocHeader (Header {headerLevel = 1, headerTitle = DocString "Hello"}))
--- >>> parseOnly header "== World"
+-- >>> snd <$> parseOnly header "== World"
 -- Right (DocHeader (Header {headerLevel = 2, headerTitle = DocString "World"}))
 header :: Parser (DocH mod Identifier)
 header = do
@@ -294,7 +314,7 @@ definitionList :: Parser (DocH mod Identifier)
 definitionList = DocDefList <$> p
   where
     p = do
-      label <- "[" *> (parseStringBS <$> takeWhile1 (`notElem` "]\n")) <* ("]" <* optional ":")
+      label <- "[" *> (parseStringBS <$> takeWhile1 (`notElem` ("]\n" :: String))) <* ("]" <* optional ":")
       c <- takeLine
       (cs, items) <- more p
       let contents = parseString . dropNLs . unlines $ c : cs
@@ -331,10 +351,10 @@ moreContent :: Monoid a => Parser a
             -> Parser ([String], Either (DocH mod Identifier) a)
 moreContent item = first . (:) <$> nonEmptyLine <*> more item
 
--- | Runs the 'parseParas' parser on an indented paragraph.
+-- | Parses an indented paragraph.
 -- The indentation is 4 spaces.
 indentedParagraphs :: Parser (DocH mod Identifier)
-indentedParagraphs = parseParas . concat <$> dropFrontOfPara "    "
+indentedParagraphs = (concat <$> dropFrontOfPara "    ") >>= parseParagraphs
 
 -- | Grab as many fully indented paragraphs as we can.
 dropFrontOfPara :: Parser BS.ByteString -> Parser [String]
@@ -422,7 +442,7 @@ endOfLine = void "\n" <|> endOfInput
 
 -- | Property parser.
 --
--- >>> parseOnly property "prop> hello world"
+-- >>> snd <$> parseOnly property "prop> hello world"
 -- Right (DocProperty "hello world")
 property :: Parser (DocH mod a)
 property = DocProperty . strip . decodeUtf8 <$> ("prop>" *> takeWhile1 (/= '\n'))
@@ -500,7 +520,7 @@ autoUrl = mkLink <$> url
     url = mappend <$> ("http://" <|> "https://" <|> "ftp://") <*> takeWhile1 (not . isSpace)
     mkLink :: BS.ByteString -> DocH mod a
     mkLink s = case unsnoc s of
-      Just (xs, x) | x `elem` ",.!?" -> DocHyperlink (Hyperlink (decodeUtf8 xs) Nothing) `docAppend` DocString [x]
+      Just (xs, x) | x `elem` (",.!?" :: String) -> DocHyperlink (Hyperlink (decodeUtf8 xs) Nothing) `docAppend` DocString [x]
       _ -> DocHyperlink (Hyperlink (decodeUtf8 s) Nothing)
 
 -- | Parses strings between identifier delimiters. Consumes all input that it
@@ -509,16 +529,15 @@ autoUrl = mkLink <$> url
 parseValid :: Parser String
 parseValid = p some
   where
-    idChar = satisfy (`elem` "_.!#$%&*+/<=>?@\\|-~:^")
+    idChar = satisfy (`elem` ("_.!#$%&*+/<=>?@\\|-~:^"::String))
              <|> digit <|> letter_ascii
     p p' = do
       vs' <- p' $ utf8String "⋆" <|> return <$> idChar
       let vs = concat vs'
-      c <- peekChar
+      c <- peekChar'
       case c of
-        Just '`' -> return vs
-        Just '\'' -> (\x -> vs ++ "'" ++ x) <$> ("'" *> p many')
-                     <|> return vs
+        '`' -> return vs
+        '\'' -> (\x -> vs ++ "'" ++ x) <$> ("'" *> p many') <|> return vs
         _ -> fail "outofvalid"
 
 -- | Parses UTF8 strings from ByteString streams.

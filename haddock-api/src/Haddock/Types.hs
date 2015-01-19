@@ -44,13 +44,13 @@ import Control.Monad (ap)
 
 type IfaceMap      = Map Module Interface
 type InstIfaceMap  = Map Module InstalledInterface  -- TODO: rename
-type DocMap a      = Map Name (Doc a)
-type ArgMap a      = Map Name (Map Int (Doc a))
+type DocMap a      = Map Name (MDoc a)
+type ArgMap a      = Map Name (Map Int (MDoc a))
 type SubMap        = Map Name [Name]
 type DeclMap       = Map Name [LHsDecl Name]
 type InstMap       = Map SrcSpan Name
 type FixMap        = Map Name Fixity
-type SrcMap        = Map PackageId FilePath
+type SrcMap        = Map PackageKey FilePath
 type DocPaths      = (FilePath, Maybe FilePath) -- paths to HTML and sources
 
 
@@ -128,7 +128,7 @@ data Interface = Interface
   , ifaceWarningMap :: !WarningMap
   }
 
-type WarningMap = DocMap Name
+type WarningMap = Map Name (Doc Name)
 
 
 -- | A subset of the fields of 'Interface' that we store in the interface
@@ -233,20 +233,20 @@ data ExportItem name
       }
 
   -- | Some documentation.
-  | ExportDoc !(Doc name)
+  | ExportDoc !(MDoc name)
 
   -- | A cross-reference to another module.
   | ExportModule !Module
 
 data Documentation name = Documentation
-  { documentationDoc :: Maybe (Doc name)
+  { documentationDoc :: Maybe (MDoc name)
   , documentationWarning :: !(Maybe (Doc name))
   } deriving Functor
 
 
 -- | Arguments and result are indexed by Int, zero-based from the left,
 -- because that's the easiest to use when recursing over types.
-type FnArgsDoc name = Map Int (Doc name)
+type FnArgsDoc name = Map Int (MDoc name)
 type DocForDecl name = (Documentation name, FnArgsDoc name)
 
 
@@ -301,7 +301,7 @@ instance OutputableBndr a => Outputable (InstType a) where
   ppr (DataInst  a) = text "DataInst"  <+> ppr a
 
 -- | An instance head that may have documentation.
-type DocInstance name = (InstHead name, Maybe (Doc name))
+type DocInstance name = (InstHead name, Maybe (MDoc name))
 
 -- | The head of an instance. Consists of a class name, a list of kind
 -- parameters, a list of type parameters and an instance type
@@ -315,6 +315,7 @@ type InstHead name = (name, [HsType name], [HsType name], InstType name)
 type LDoc id = Located (Doc id)
 
 type Doc id = DocH (ModuleName, OccName) id
+type MDoc id = MetaDoc (ModuleName, OccName) id
 
 instance (NFData a, NFData mod)
          => NFData (DocH mod a) where
@@ -342,9 +343,9 @@ instance (NFData a, NFData mod)
     DocHeader a               -> a `deepseq` ()
 
 
-instance NFData Name
-instance NFData OccName
-instance NFData ModuleName
+instance NFData Name where rnf x = seq x ()
+instance NFData OccName where rnf x = seq x ()
+instance NFData ModuleName where rnf x = seq x ()
 
 instance NFData id => NFData (Header id) where
   rnf (Header a b) = a `deepseq` b `deepseq` ()

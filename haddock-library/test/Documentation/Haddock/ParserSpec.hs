@@ -22,8 +22,8 @@ instance IsString (Doc String) where
 instance IsString a => IsString (Maybe a) where
   fromString = Just . fromString
 
-parseParas :: String -> Doc String
-parseParas = Parse.toRegular . Parse.parseParas
+parseParas :: String -> MetaDoc () String
+parseParas = overDoc Parse.toRegular . Parse.parseParas
 
 parseString :: String -> Doc String
 parseString = Parse.toRegular . Parse.parseString
@@ -358,11 +358,38 @@ spec = do
   describe "parseParas" $ do
     let infix 1 `shouldParseTo`
         shouldParseTo :: String -> Doc String -> Expectation
-        shouldParseTo input ast = parseParas input `shouldBe` ast
+        shouldParseTo input ast = _doc (parseParas input) `shouldBe` ast
 
     it "is total" $ do
       property $ \xs ->
         (length . show . parseParas) xs `shouldSatisfy` (> 0)
+
+    context "when parsing @since" $ do
+      it "adds specified version to the result" $ do
+        parseParas "@since 0.5.0" `shouldBe`
+          MetaDoc { _meta = Meta { _version = Just [0,5,0] }
+                  , _doc = DocEmpty }
+
+      it "ignores trailing whitespace" $ do
+        parseParas "@since 0.5.0 \t " `shouldBe`
+          MetaDoc { _meta = Meta { _version = Just [0,5,0] }
+                  , _doc = DocEmpty }
+
+      it "does not allow trailing input" $ do
+        parseParas "@since 0.5.0 foo" `shouldBe`
+          MetaDoc { _meta = Meta { _version = Nothing }
+                  , _doc = DocParagraph "@since 0.5.0 foo" }
+
+
+      context "when given multiple times" $ do
+        it "gives last occurrence precedence" $ do
+          (parseParas . unlines) [
+              "@since 0.5.0"
+            , "@since 0.6.0"
+            , "@since 0.7.0"
+            ] `shouldBe` MetaDoc { _meta = Meta { _version = Just [0,7,0] }
+                                 , _doc = DocEmpty }
+
 
     context "when parsing text paragraphs" $ do
       let filterSpecial = filter (`notElem` (".(=#-[*`\v\f\n\t\r\\\"'_/@<> " :: String))

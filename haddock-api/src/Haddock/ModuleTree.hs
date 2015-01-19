@@ -12,26 +12,29 @@
 module Haddock.ModuleTree ( ModuleTree(..), mkModuleTree ) where
 
 
-import Haddock.Types ( Doc )
+import Haddock.Types ( MDoc )
 
 import GHC           ( Name )
-import Module        ( Module, moduleNameString, moduleName, modulePackageId,
-                       packageIdString )
+import Module        ( Module, moduleNameString, moduleName, modulePackageKey )
+import DynFlags      ( DynFlags )
+import Packages      ( lookupPackage )
+import PackageConfig ( sourcePackageIdString )
 
 
-data ModuleTree = Node String Bool (Maybe String) (Maybe (Doc Name)) [ModuleTree]
+data ModuleTree = Node String Bool (Maybe String) (Maybe (MDoc Name)) [ModuleTree]
 
 
-mkModuleTree :: Bool -> [(Module, Maybe (Doc Name))] -> [ModuleTree]
-mkModuleTree showPkgs mods =
+mkModuleTree :: DynFlags -> Bool -> [(Module, Maybe (MDoc Name))] -> [ModuleTree]
+mkModuleTree dflags showPkgs mods =
   foldr fn [] [ (splitModule mdl, modPkg mdl, short) | (mdl, short) <- mods ]
   where
-    modPkg mod_ | showPkgs = Just (packageIdString (modulePackageId mod_))
+    modPkg mod_ | showPkgs = fmap sourcePackageIdString
+                                  (lookupPackage dflags (modulePackageKey mod_))
                 | otherwise = Nothing
     fn (mod_,pkg,short) = addToTrees mod_ pkg short
 
 
-addToTrees :: [String] -> Maybe String -> Maybe (Doc Name) -> [ModuleTree] -> [ModuleTree]
+addToTrees :: [String] -> Maybe String -> Maybe (MDoc Name) -> [ModuleTree] -> [ModuleTree]
 addToTrees [] _ _ ts = ts
 addToTrees ss pkg short [] = mkSubTree ss pkg short
 addToTrees (s1:ss) pkg short (t@(Node s2 leaf node_pkg node_short subs) : ts)
@@ -43,7 +46,7 @@ addToTrees (s1:ss) pkg short (t@(Node s2 leaf node_pkg node_short subs) : ts)
   this_short = if null ss then short else node_short
 
 
-mkSubTree :: [String] -> Maybe String -> Maybe (Doc Name) -> [ModuleTree]
+mkSubTree :: [String] -> Maybe String -> Maybe (MDoc Name) -> [ModuleTree]
 mkSubTree []     _   _     = []
 mkSubTree [s]    pkg short = [Node s True pkg short []]
 mkSubTree (s:ss) pkg short = [Node s (null ss) Nothing Nothing (mkSubTree ss pkg short)]

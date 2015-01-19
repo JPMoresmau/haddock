@@ -1,5 +1,5 @@
 name:                 haddock-library
-version:              1.1.1
+version:              1.2.0
 synopsis:             Library exposing some functionality of Haddock.
 description:          Haddock is a documentation-generation tool for Haskell
                       libraries. These modules expose some functionality of it
@@ -21,15 +21,17 @@ library
   default-language:     Haskell2010
 
   build-depends:
-    base >= 4.3 && < 4.8,
-    bytestring,
-    deepseq
+      base >= 4.3 && < 4.9
+    , bytestring
+    , transformers
+    , deepseq
 
   hs-source-dirs:       src, vendor/attoparsec-0.12.1.1
   ghc-options:          -funbox-strict-fields -Wall -fwarn-tabs -O2
 
   exposed-modules:
     Documentation.Haddock.Parser
+    Documentation.Haddock.Parser.Monad
     Documentation.Haddock.Types
     Documentation.Haddock.Doc
 
@@ -68,10 +70,12 @@ test-suite spec
 
   build-depends:
       base
+    , bytestring
+    , transformers
+    , deepseq
+
     , base-compat
     , hspec
-    , bytestring
-    , deepseq
     , QuickCheck == 2.*
 
 source-repository head

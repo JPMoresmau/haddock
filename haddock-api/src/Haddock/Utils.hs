@@ -39,6 +39,7 @@ module Haddock.Utils (
   -- * Doc markup
   markup,
   idMarkup,
+  mkMeta,
 
   -- * List utilities
   replace,
@@ -56,6 +57,7 @@ module Haddock.Utils (
  ) where
 
 
+import Documentation.Haddock.Doc (emptyMetaDoc)
 import Haddock.Types
 import Haddock.GhcUtils
 
@@ -110,14 +112,16 @@ out progVerbosity msgVerbosity msg
 
 
 -- | Extract a module's short description.
-toDescription :: Interface -> Maybe (Doc Name)
-toDescription = hmi_description . ifaceInfo
+toDescription :: Interface -> Maybe (MDoc Name)
+toDescription = fmap mkMeta . hmi_description . ifaceInfo
 
 
 -- | Extract a module's short description.
-toInstalledDescription :: InstalledInterface -> Maybe (Doc Name)
-toInstalledDescription = hmi_description . instInfo
+toInstalledDescription :: InstalledInterface -> Maybe (MDoc Name)
+toInstalledDescription = fmap mkMeta . hmi_description . instInfo
 
+mkMeta :: Doc a -> MDoc a
+mkMeta x = emptyMetaDoc { _doc = x }
 
 --------------------------------------------------------------------------------
 -- * Making abstract declarations
@@ -146,23 +150,22 @@ restrictDataDefn names defn@(HsDataDefn { dd_ND = new_or_data, dd_cons = cons })
 restrictCons :: [Name] -> [LConDecl Name] -> [LConDecl Name]
 restrictCons names decls = [ L p d | L p (Just d) <- map (fmap keep) decls ]
   where
-    keep d | unLoc (con_name d) `elem` names =
+    keep d | any (\n -> n `elem` names) (map unLoc $ con_names d) =
       case con_details d of
         PrefixCon _ -> Just d
         RecCon fields
           | all field_avail fields -> Just d
-          | otherwise -> Just (d { con_details = PrefixCon (field_types fields) })
+          | otherwise -> Just (d { con_details = PrefixCon (field_types (map unL fields)) })
           -- if we have *all* the field names available, then
           -- keep the record declaration.  Otherwise degrade to
           -- a constructor declaration.  This isn't quite right, but
           -- it's the best we can do.
         InfixCon _ _ -> Just d
       where
-        field_avail (ConDeclField n _ _) = unLoc n `elem` names
+        field_avail (L _ (ConDeclField ns _ _)) = all (\n -> unLoc n `elem` names) ns
         field_types flds = [ t | ConDeclField _ t _ <- flds ]
 
     keep _ = Nothing
-
 
 restrictDecls :: [Name] -> [LSig Name] -> [LSig Name]
 restrictDecls names = mapMaybe (filterLSigNames (`elem` names))
@@ -300,11 +303,7 @@ bye :: String -> IO a
 bye s = putStr s >> exitSuccess
 
 
-die :: String -> IO a
-die s = hPutStr stderr s >> exitWith (ExitFailure 1)
-
-
-dieMsg :: String -> IO a
+dieMsg :: String -> IO ()
 dieMsg s = getProgramName >>= \prog -> die (prog ++ ": " ++ s)
 
 

@@ -16,7 +16,6 @@ module Haddock.Convert where
 -- Some other functions turned out to be useful for converting
 -- instance heads, which aren't TyThings, so just export everything.
 
-
 import Bag ( emptyBag )
 import BasicTypes ( TupleSort(..) )
 import Class
@@ -36,12 +35,13 @@ import PrelNames (ipClassName)
 import SrcLoc ( Located, noLoc, unLoc )
 import TcType ( tcSplitSigmaTy )
 import TyCon
-import Type(isStrLitTy)
+import Type (isStrLitTy, mkFunTys)
 import TypeRep
 import TysPrim ( alphaTyVars )
 import TysWiredIn ( listTyConName, eqTyCon )
 import Unique ( getUnique )
 import Var
+
 
 
 -- the main function here! yay!
@@ -66,7 +66,7 @@ tyThingToLHsDecl t = case t of
            extractFamilyDecl _           =
              Left "tyThingToLHsDecl: impossible associated tycon"
 
-           atTyClDecls = [synifyTyCon Nothing at_tc | (at_tc, _) <- classATItems cl]
+           atTyClDecls = [synifyTyCon Nothing at_tc | ATI at_tc _ <- classATItems cl]
            atFamDecls  = map extractFamilyDecl (rights atTyClDecls)
            tyClErrors = lefts atTyClDecls
            famDeclErrors = lefts atFamDecls
@@ -85,7 +85,7 @@ tyThingToLHsDecl t = case t of
          , tcdATs = rights atFamDecls
          , tcdATDefs = [] --ignore associated type defaults
          , tcdDocs = [] --we don't have any docs at this point
-         , tcdFVs = placeHolderNames }
+         , tcdFVs = placeHolderNamesTc }
     | otherwise
     -> synifyTyCon Nothing tc >>= allOK . TyClD
 
@@ -95,24 +95,17 @@ tyThingToLHsDecl t = case t of
 
   -- a data-constructor alone just gets rendered as a function:
   AConLike (RealDataCon dc) -> allOK $ SigD (TypeSig [synifyName dc]
-    (synifyType ImplicitizeForAll (dataConUserType dc)))
+    (synifyType ImplicitizeForAll (dataConUserType dc)) [])
 
   AConLike (PatSynCon ps) ->
-#if MIN_VERSION_ghc(7,8,3)
-      let (_, _, req_theta, prov_theta, _, res_ty) = patSynSig ps
-#else
-      let (_, _, (req_theta, prov_theta)) = patSynSig ps
-#endif
+      let (univ_tvs, ex_tvs, req_theta, prov_theta, arg_tys, res_ty) = patSynSig ps
+          qtvs = univ_tvs ++ ex_tvs
+          ty = mkFunTys arg_tys res_ty
       in allOK . SigD $ PatSynSig (synifyName ps)
-#if MIN_VERSION_ghc(7,8,3)
-                          (fmap (synifyType WithinType) (patSynTyDetails ps))
-                          (synifyType WithinType res_ty)
-#else
-                          (fmap (synifyType WithinType) (patSynTyDetails ps))
-                          (synifyType WithinType (patSynType ps))
-#endif
+                          (Implicit, synifyTyVars qtvs)
                           (synifyCtx req_theta)
                           (synifyCtx prov_theta)
+                          (synifyType WithinType ty)
   where
     withErrs e x = return (e, x)
     allOK x = return (mempty, x)
@@ -123,19 +116,20 @@ synifyAxBranch tc (CoAxBranch { cab_tvs = tkvs, cab_lhs = args, cab_rhs = rhs })
         typats     = map (synifyType WithinType) args
         hs_rhs     = synifyType WithinType rhs
         (kvs, tvs) = partition isKindVar tkvs
-    in TyFamInstEqn { tfie_tycon = name
-                    , tfie_pats  = HsWB { hswb_cts = typats
-                                        , hswb_kvs = map tyVarName kvs
-                                        , hswb_tvs = map tyVarName tvs }
-                    , tfie_rhs   = hs_rhs }
+    in TyFamEqn { tfe_tycon = name
+                , tfe_pats  = HsWB { hswb_cts = typats
+                                    , hswb_kvs = map tyVarName kvs
+                                    , hswb_tvs = map tyVarName tvs
+                                    , hswb_wcs = [] }
+                , tfe_rhs   = hs_rhs }
 
 synifyAxiom :: CoAxiom br -> Either ErrMsg (HsDecl Name)
 synifyAxiom ax@(CoAxiom { co_ax_tc = tc })
-  | isOpenSynFamilyTyCon tc
+  | isOpenTypeFamilyTyCon tc
   , Just branch <- coAxiomSingleBranch_maybe ax
   = return $ InstD (TyFamInstD
                     (TyFamInstDecl { tfid_eqn = noLoc $ synifyAxBranch tc branch
-                                   , tfid_fvs = placeHolderNames }))
+                                   , tfid_fvs = placeHolderNamesTc }))
 
   | Just ax' <- isClosedSynFamilyTyCon_maybe tc
   , getUnique ax' == getUnique ax   -- without the getUniques, type error
@@ -167,10 +161,10 @@ synifyTyCon coax tc
                                                -- we have their kind accurately:
                                       , dd_cons = []  -- No constructors
                                       , dd_derivs = Nothing }
-           , tcdFVs = placeHolderNames }
+           , tcdFVs = placeHolderNamesTc }
 
-  | isSynFamilyTyCon tc
-  = case synTyConRhs_maybe tc of
+  | isTypeFamilyTyCon tc
+  = case famTyConFlav_maybe tc of
       Just rhs ->
         let info = case rhs of
               OpenSynFamilyTyCon -> return OpenTypeFamily
@@ -179,7 +173,6 @@ synifyTyCon coax tc
                   (brListMap (noLoc . synifyAxBranch tc) branches)
               BuiltInSynFamTyCon {} -> return $ ClosedTypeFamily []
               AbstractClosedSynFamilyTyCon {} -> return $ ClosedTypeFamily []
-              _ -> Left "synifyTyCon: type/data family confusion"
         in info >>= \i ->
            return (FamDecl
                    (FamilyDecl { fdInfo = i
@@ -197,14 +190,11 @@ synifyTyCon coax tc
           FamDecl (FamilyDecl DataFamily (synifyName tc) (synifyTyVars (tyConTyVars tc))
                               Nothing) --always kind '*'
         _ -> Left "synifyTyCon: impossible open data type?"
-  | isSynTyCon tc
-  = case synTyConRhs_maybe tc of
-        Just (SynonymTyCon ty) -> return $
-          SynDecl { tcdLName = synifyName tc
-                  , tcdTyVars = synifyTyVars (tyConTyVars tc)
-                  , tcdRhs = synifyType WithinType ty
-                  , tcdFVs = placeHolderNames }
-        _ -> Left "synifyTyCon: impossible synTyCon"
+  | Just ty <- synTyConRhs_maybe tc
+  = return $ SynDecl { tcdLName = synifyName tc
+                     , tcdTyVars = synifyTyVars (tyConTyVars tc)
+                     , tcdRhs = synifyType WithinType ty
+                     , tcdFVs = placeHolderNamesTc }
   | otherwise =
   -- (closed) newtype and data
   let
@@ -246,7 +236,7 @@ synifyTyCon coax tc
  in case lefts consRaw of
   [] -> return $
         DataDecl { tcdLName = name, tcdTyVars = tyvars, tcdDataDefn = defn
-                 , tcdFVs = placeHolderNames }
+                 , tcdFVs = placeHolderNamesTc }
   dataConErrs -> Left $ unlines dataConErrs
 
 -- User beware: it is your responsibility to pass True (use_gadt_syntax)
@@ -284,8 +274,8 @@ synifyDataCon use_gadt_syntax dc =
             -- HsNoBang never appears, it's implied instead.
           )
           arg_tys (dataConStrictMarks dc)
-  field_tys = zipWith (\field synTy -> ConDeclField
-                                           (synifyName field) synTy Nothing)
+  field_tys = zipWith (\field synTy -> noLoc $ ConDeclField
+                                               [synifyName field] synTy Nothing)
                 (dataConFieldLabels dc) linear_tys
   hs_arg_tys = case (use_named_field_syntax, use_infix_syntax) of
           (True,True) -> Left "synifyDataCon: contradiction!"
@@ -299,18 +289,17 @@ synifyDataCon use_gadt_syntax dc =
               else ResTyH98
  -- finally we get synifyDataCon's result!
  in hs_arg_tys >>=
-      \hat -> return . noLoc $ ConDecl name Implicit {-we don't know nor care-}
+      \hat -> return . noLoc $ ConDecl [name] Implicit -- we don't know nor care
                 qvars ctx hat hs_res_ty Nothing
                 -- we don't want any "deprecated GADT syntax" warnings!
                 False
-
 
 synifyName :: NamedThing n => n -> Located Name
 synifyName = noLoc . getName
 
 
 synifyIdSig :: SynifyTypeState -> Id -> Sig Name
-synifyIdSig s i = TypeSig [synifyName i] (synifyType s (varType i))
+synifyIdSig s i = TypeSig [synifyName i] (synifyType s (varType i)) []
 
 
 synifyCtx :: [PredType] -> LHsContext Name
@@ -386,7 +375,7 @@ synifyType s forallty@(ForAllTy _tv _ty) =
       sCtx = synifyCtx ctx
       sTau = synifyType WithinType tau
       mkHsForAllTy forallPlicitness =
-        noLoc $ HsForAllTy forallPlicitness sTvs sCtx sTau
+        noLoc $ HsForAllTy forallPlicitness Nothing sTvs sCtx sTau
   in case s of
     DeleteTopLevelQuantification -> synifyType ImplicitizeForAll tau
     WithinType -> mkHsForAllTy Explicit

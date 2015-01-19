@@ -26,15 +26,28 @@ $(INPLACE_BIN)/$(utils/haddock_dist_PROG): $(INPLACE_LIB)/html $(INPLACE_LIB)/la
 
 $(INPLACE_LIB)/html:
 	$(call removeTrees,$@)
-	"$(CP)" -RL utils/haddock/resources/html $@
+	"$(CP)" -RL utils/haddock/haddock-api/resources/html $@
 
 $(INPLACE_LIB)/latex:
 	$(call removeTrees,$@)
-	"$(CP)" -RL utils/haddock/resources/latex $@
+	"$(CP)" -RL utils/haddock/haddock-api/resources/latex $@
 
 endif
 
 utils/haddock_dist_MODULES += Paths_haddock
+
+utils/haddock_dist_DATA_FILES += html/frames.html
+utils/haddock_dist_DATA_FILES += html/haddock-util.js
+utils/haddock_dist_DATA_FILES += html/Classic.theme/haskell_icon.gif
+utils/haddock_dist_DATA_FILES += html/Classic.theme/minus.gif
+utils/haddock_dist_DATA_FILES += html/Classic.theme/plus.gif
+utils/haddock_dist_DATA_FILES += html/Classic.theme/xhaddock.css
+utils/haddock_dist_DATA_FILES += html/Ocean.std-theme/hslogo-16.png
+utils/haddock_dist_DATA_FILES += html/Ocean.std-theme/minus.gif
+utils/haddock_dist_DATA_FILES += html/Ocean.std-theme/ocean.css
+utils/haddock_dist_DATA_FILES += html/Ocean.std-theme/plus.gif
+utils/haddock_dist_DATA_FILES += html/Ocean.std-theme/synopsis.png
+utils/haddock_dist_DATA_FILES += latex/haddock.sty
 
 ifeq "$(HADDOCK_DOCS)" "YES"
 install: install_utils/haddock_data
@@ -48,12 +61,11 @@ install_utils/haddock_data:
 	$(foreach i,$(sort $(dir $(utils/haddock_dist_DATA_FILES))), \
 	    $(call make-command,$(call INSTALL_DIR,"$(DESTDIR)$(ghclibdir)/$i")))
 	$(foreach i,$(utils/haddock_dist_DATA_FILES), \
-	    $(call make-command,$(call INSTALL_DATA,$(INSTALL_OPTS),utils/haddock/resources/$i,"$(DESTDIR)$(ghclibdir)/$(dir $i)")))
+	    $(call make-command,$(call INSTALL_DATA,$(INSTALL_OPTS),utils/haddock/haddock-api/resources/$i,"$(DESTDIR)$(ghclibdir)/$(dir $i)")))
 
 .PHONY: install_utils/haddock_link
 install_utils/haddock_link:
 	$(call removeFiles,"$(DESTDIR)$(bindir)/haddock")
 	$(LN_S) $(utils/haddock_dist_INSTALL_SHELL_WRAPPER_NAME) "$(DESTDIR)$(bindir)/haddock"
 
-BINDIST_EXTRAS += $(addprefix utils/haddock/resources/,$(utils/haddock_dist_DATA_FILES))
-
+BINDIST_EXTRAS += $(addprefix utils/haddock/haddock-api/resources/,$(utils/haddock_dist_DATA_FILES))

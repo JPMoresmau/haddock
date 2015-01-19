@@ -47,7 +47,6 @@ import Data.IORef
 import qualified Data.Map as Map
 import System.IO
 import System.Exit
-import System.Directory
 
 #if defined(mingw32_HOST_OS)
 import Foreign
@@ -60,14 +59,17 @@ import System.FilePath
 #else
 import qualified GHC.Paths as GhcPaths
 import Paths_haddock_api (getDataDir)
+import System.Directory (doesDirectoryExist)
 #endif
 
 import GHC hiding (verbosity)
 import Config
-import DynFlags hiding (verbosity)
+import DynFlags hiding (projectVersion, verbosity)
 import StaticFlags (discardStaticFlags)
 import Panic (handleGhcException)
 import Module
+import PackageConfig
+import FastString
 
 --------------------------------------------------------------------------------
 -- * Exception handling
@@ -223,7 +225,7 @@ renderStep dflags flags qual pkgs interfaces = do
   let
     ifaceFiles = map snd pkgs
     installedIfaces = concatMap ifInstalledIfaces ifaceFiles
-    srcMap = Map.fromList [ (ifPackageId if_, x) | ((_, Just x), if_) <- pkgs ]
+    srcMap = Map.fromList [ (ifPackageKey if_, x) | ((_, Just x), if_) <- pkgs ]
   render dflags flags qual interfaces installedIfaces srcMap
 
 
@@ -248,14 +250,14 @@ render dflags flags qual ifaces installedIfaces srcMap = do
     allVisibleIfaces = [ i | i <- allIfaces, OptHide `notElem` instOptions i ]
 
     pkgMod           = ifaceMod (head ifaces)
-    pkgId            = modulePackageId pkgMod
-    pkgStr           = Just (packageIdString pkgId)
-    (pkgName,pkgVer) = modulePackageInfo pkgMod
+    pkgKey            = modulePackageKey pkgMod
+    pkgStr           = Just (packageKeyString pkgKey)
+    (pkgName,pkgVer) = modulePackageInfo dflags pkgMod
 
     (srcBase, srcModule, srcEntity, srcLEntity) = sourceUrls flags
-    srcMap' = maybe srcMap (\path -> Map.insert pkgId path srcMap) srcEntity
+    srcMap' = maybe srcMap (\path -> Map.insert pkgKey path srcMap) srcEntity
     -- TODO: Get these from the interface files as with srcMap
-    srcLMap' = maybe Map.empty (\path -> Map.singleton pkgId path) srcLEntity
+    srcLMap' = maybe Map.empty (\path -> Map.singleton pkgKey path) srcLEntity
     sourceUrls' = (srcBase, srcModule, srcMap', srcLMap')
 
   libDir   <- getHaddockLibDir flags
@@ -269,28 +271,33 @@ render dflags flags qual ifaces installedIfaces srcMap = do
     copyHtmlBits odir libDir themes
 
   when (Flag_GenContents `elem` flags) $ do
-    ppHtmlContents odir title pkgStr
+    ppHtmlContents dflags odir title pkgStr
                    themes opt_index_url sourceUrls' opt_wiki_urls
                    allVisibleIfaces True prologue pretty
                    (makeContentsQual qual)
     copyHtmlBits odir libDir themes
 
   when (Flag_Html `elem` flags) $ do
-    ppHtml title pkgStr visibleIfaces odir
+    ppHtml dflags title pkgStr visibleIfaces odir
                 prologue
                 themes sourceUrls' opt_wiki_urls
                 opt_contents_url opt_index_url unicode qual
                 pretty
     copyHtmlBits odir libDir themes
 
+  -- TODO: we throw away Meta for both Hoogle and LaTeX right now,
+  -- might want to fix that if/when these two get some work on them
   when (Flag_Hoogle `elem` flags) $ do
-    let pkgName2 = if pkgName == "main" && title /= [] then title else pkgName
-    ppHoogle dflags pkgName2 pkgVer title prologue visibleIfaces odir
+    let pkgNameStr | unpackFS pkgNameFS == "main" && title /= []
+                               = title
+                   | otherwise = unpackFS pkgNameFS
+          where PackageName pkgNameFS = pkgName
+    ppHoogle dflags pkgNameStr pkgVer title (fmap _doc prologue) visibleIfaces
+      odir
 
   when (Flag_LaTeX `elem` flags) $ do
-    ppLaTeX title pkgStr visibleIfaces odir prologue opt_latex_style
+    ppLaTeX title pkgStr visibleIfaces odir (fmap _doc prologue) opt_latex_style
                   libDir
-
 
 -------------------------------------------------------------------------------
 -- * Reading and dumping interface files
@@ -449,7 +456,7 @@ updateHTMLXRefs packages = do
     mapping' = [ (moduleName m, html) | (m, html) <- mapping ]
 
 
-getPrologue :: DynFlags -> [Flag] -> IO (Maybe (Doc RdrName))
+getPrologue :: DynFlags -> [Flag] -> IO (Maybe (MDoc RdrName))
 getPrologue dflags flags =
   case [filename | Flag_Prologue filename <- flags ] of
     [] -> return Nothing
